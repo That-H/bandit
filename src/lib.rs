@@ -229,9 +229,14 @@ impl<E: Entity> Map<E> {
     /// effect.
     #[inline]
     pub fn get_top(&self, x: usize, y: usize) -> Option<&E::Counterpart> {
-        self.vfx.get(&(x, y)).or_else(|| self.get_map(x, y))
+        self.get_effect(x, y).or_else(|| self.get_map(x, y))
     }
-
+	
+	#[inline]
+	fn get_effect(&self, x: usize, y: usize) -> Option<&E::Counterpart> {
+		self.vfx.get(&(x, y))
+	}
+	
     /// Get the entity at the given position.
     #[inline]
     pub fn get_ent(&self, x: usize, y: usize) -> Option<&E> {
@@ -397,11 +402,14 @@ impl<E: Entity> fmt::Display for Window<'_, E> {
         writeln!(f)?;
         for y in self.top..self.top + self.hgt {
             for x in self.left..self.left + self.wid {
-                match self.get_top(x, y) {
-                    Some(t) => write!(f, "{t}")?,
+                match self.get_effect(x, y) {
+                    Some(v) => write!(f, "{v}")?,
                     None => match self.get_ent(x, y) {
                         Some(e) => write!(f, "{e}")?,
-                        None => write!(f, "{def}")?,
+                        None => match self.get_map(x, y) {
+							Some(t) => write!(f, "{t}")?,
+							None => write!(f, "{def}")?,
+						},
                     },
                 };
             }
