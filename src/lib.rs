@@ -208,6 +208,16 @@ impl<E: Entity> Map<E> {
             entities: HashMap::with_capacity(wid * hgt),
         }
     }
+	
+	/// Inserts the given tile into the map.
+	pub fn insert_tile(&mut self, tile: E::Counterpart, x: usize, y: usize) {
+		self.map.insert((x, y), tile);
+	}
+	
+	/// Inserts the given entity into the map.
+	pub fn insert_entity(&mut self, ent: E, x: usize, y: usize) {
+		self.entities.insert((x, y), ent);
+	}
 
     /// Get the tile at the given position.
     #[inline]
@@ -222,12 +232,18 @@ impl<E: Entity> Map<E> {
         self.vfx.get(&(x, y)).or_else(|| self.get_map(x, y))
     }
 
-    /// Get the entity.
+    /// Get the entity at the given position.
     #[inline]
     pub fn get_ent(&self, x: usize, y: usize) -> Option<&E> {
         self.entities.get(&(x, y))
     }
-
+	
+	/// Return all entities in the map with positions in an 
+	/// arbitrary order.
+	pub fn get_entities(&self) -> impl Iterator<Item = (&(usize, usize), &E)> {
+		self.entities.iter()
+	}
+	
     /// Updates all entities. If at any point, visual effects
     /// would exist, they are repeatedly updated until that is
     /// no longer the case.
