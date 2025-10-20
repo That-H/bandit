@@ -4,7 +4,7 @@
 use crossterm::{cursor, execute, queue, terminal};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Write};
-use std::{fmt, ops};
+use std::{fmt, ops, thread, time};
 
 /// Trait for types that are able to be used as tiles in a [Map].
 /// By implementing this trait for a type you are asserting that its
@@ -22,6 +22,8 @@ pub trait Tile: fmt::Display + Default {
 pub trait Entity: fmt::Display {
 	/// The Tile type associated with this entity.
 	type Counterpart: Tile;
+	/// The printable type for displaying information used by this entity.
+	type Msg: fmt::Display;
 	
     /// Queue everything that needs to change as a result of this entity
     /// after a frame. Pos is the current position of the entity in the map.
@@ -82,6 +84,8 @@ enum CmdInner<E: Entity> {
     CreateEnt(E),
     MoveTo(usize, usize),
     Disp(usize, usize),
+	Message(E::Msg),
+	ClearRow,
     Null,
 }
 
@@ -112,7 +116,26 @@ impl<E: Entity> Cmd<E> {
             action: CmdInner::Null,
         }
     }
-
+	
+	/// Sets the next message to display. The position the message is displayed
+	/// at is the co-ordinates provided applied to the terminal window.
+	/// Not recommended to display messages on the actual map.
+	/// Also not automatically cleared.
+	pub fn display_message(self, msg: E::Msg) -> Self {
+        Self {
+            action: CmdInner::Message(msg),
+			..self
+        }		
+	}
+	
+	/// Clears all text on the row defined by the current position.
+	pub fn clear_row(self) -> Self {
+        Self {
+            action: CmdInner::ClearRow,
+			..self
+        }				
+	}
+	
     /// Sets the position to move the entity to.
     pub fn move_to(self, x: usize, y: usize) -> Self {
         Self {
@@ -251,8 +274,18 @@ impl<E: Entity> Map<E> {
 	
     /// Updates all entities. If at any point, visual effects
     /// would exist, they are repeatedly updated until that is
-    /// no longer the case.
-    pub fn update(&mut self, win_left: usize, win_top: usize, win_wid: usize, win_hgt: usize) {
+    /// no longer the case, with a pause of delay milliseconds
+	/// between each update.
+    pub fn update(
+		&mut self,
+		win_left: usize,
+		win_top: usize,
+		win_wid: usize,
+		win_hgt: usize,
+		delay: u64,
+	) {
+		let delay = time::Duration::from_millis(delay);
+		
         let mut e_keys: Vec<_> = self.entities.keys().copied().collect();
         e_keys.sort_by_key(|e| self.entities[e].priority());
 
@@ -294,6 +327,12 @@ impl<E: Entity> Map<E> {
                     }
                     CmdInner::MoveTo(x, y) => new_pos = Some((x, y)),
                     CmdInner::Disp(x, y) => new_pos = Some((ek.0 + x, ek.1 + y)),
+					CmdInner::Message(msg) => { 
+						execute!(io::stdout(), cursor::MoveTo(pos.0 as u16, pos.1 as u16), crossterm::style::Print(msg));
+					}
+					CmdInner::ClearRow => { 
+						execute!(io::stdout(), cursor::MoveTo(0, pos.1 as u16), terminal::Clear(terminal::ClearType::CurrentLine));
+					}
 					CmdInner::Null => (),
                 }
 
@@ -312,6 +351,7 @@ impl<E: Entity> Map<E> {
 
             // Repeatedly update the window until no more visual effects exist.
             loop {
+				thread::sleep(delay);
                 let win = Window::new(self, win_left, win_top, win_wid, win_hgt);
                 win.display();
 
@@ -385,7 +425,6 @@ impl<'a, E: Entity> Window<'a, E> {
                 handle,
                 cursor::Hide,
                 cursor::MoveTo(0, 0),
-                terminal::Clear(terminal::ClearType::FromCursorDown),
                 crossterm::style::Print(self),
             );
             handle.flush();
