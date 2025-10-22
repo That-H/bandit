@@ -11,7 +11,11 @@ use std::{fmt, ops, thread, time};
 /// display implementation never outputs a newline character or more
 /// than one character at a time, and that the default value represents
 /// an empty tile to be used where there is no tile in the map.
-pub trait Tile: fmt::Display + Default {
+pub trait Tile: fmt::Display + Default {}
+
+/// Trait for types that are able to be used as visual effects in a [Map].
+/// Should never print multiple characters or a newline.
+pub trait Vfx: fmt::Display {
     /// Update the tile if it is a visual effect. Returns true
     /// if it should be deleted, otherwise returns false.
     fn update_vfx(&mut self) -> bool;
@@ -20,11 +24,13 @@ pub trait Tile: fmt::Display + Default {
 /// Types that actively do something in a [Map] instead of just being
 /// like a tile.
 pub trait Entity: fmt::Display {
-	/// The Tile type associated with this entity.
-	type Counterpart: Tile;
-	/// The printable type for displaying information used by this entity.
-	type Msg: fmt::Display;
-	
+    /// The Tile type associated with this entity.
+    type Tile: Tile;
+	/// The visual effect type associated with this entity.
+	type Vfx: Vfx;
+    /// The printable type for displaying information used by this entity.
+    type Msg: fmt::Display;
+
     /// Queue everything that needs to change as a result of this entity
     /// after a frame. Pos is the current position of the entity in the map.
     fn update(&self, cmd: &mut Commands<'_, Self>, pos: (usize, usize))
@@ -75,17 +81,17 @@ enum Pos {
 }
 
 enum CmdInner<E: Entity> {
-    ModTile(EditTile<E::Counterpart>),
+    ModTile(EditTile<E::Tile>),
     ModEnt(EditEntity<E>),
     DelTile,
     DelEnt,
-    CreateTile(E::Counterpart),
-    CreateVfx(E::Counterpart),
+    CreateTile(E::Tile),
+    CreateVfx(E::Vfx),
     CreateEnt(E),
     MoveTo(usize, usize),
     Disp(usize, usize),
-	Message(E::Msg),
-	ClearRow,
+    Message(E::Msg),
+    ClearRow,
     Null,
 }
 
@@ -116,26 +122,26 @@ impl<E: Entity> Cmd<E> {
             action: CmdInner::Null,
         }
     }
-	
-	/// Sets the next message to display. The position the message is displayed
-	/// at is the co-ordinates provided applied to the terminal window.
-	/// Not recommended to display messages on the actual map.
-	/// Also not automatically cleared.
-	pub fn display_message(self, msg: E::Msg) -> Self {
+
+    /// Sets the next message to display. The position the message is displayed
+    /// at is the co-ordinates provided applied to the terminal window.
+    /// Not recommended to display messages on the actual map.
+    /// Also not automatically cleared.
+    pub fn display_message(self, msg: E::Msg) -> Self {
         Self {
             action: CmdInner::Message(msg),
-			..self
-        }		
-	}
-	
-	/// Clears all text on the row defined by the current position.
-	pub fn clear_row(self) -> Self {
+            ..self
+        }
+    }
+
+    /// Clears all text on the row defined by the current position.
+    pub fn clear_row(self) -> Self {
         Self {
             action: CmdInner::ClearRow,
-			..self
-        }				
-	}
-	
+            ..self
+        }
+    }
+
     /// Sets the position to move the entity to.
     pub fn move_to(self, x: usize, y: usize) -> Self {
         Self {
@@ -153,7 +159,7 @@ impl<E: Entity> Cmd<E> {
     }
 
     /// Defines the function used to modify the tile.
-    pub fn modify_tile(self, f: EditTile<E::Counterpart>) -> Self {
+    pub fn modify_tile(self, f: EditTile<E::Tile>) -> Self {
         Self {
             action: CmdInner::ModTile(f),
             ..self
@@ -169,7 +175,7 @@ impl<E: Entity> Cmd<E> {
     }
 
     /// Adds the tile to create.
-    pub fn create_tile(self, tile: E::Counterpart) -> Self {
+    pub fn create_tile(self, tile: E::Tile) -> Self {
         Self {
             action: CmdInner::CreateTile(tile),
             ..self
@@ -177,7 +183,7 @@ impl<E: Entity> Cmd<E> {
     }
 
     /// Adds the effect to create.
-    pub fn create_effect(self, vfx: E::Counterpart) -> Self {
+    pub fn create_effect(self, vfx: E::Vfx) -> Self {
         Self {
             action: CmdInner::CreateVfx(vfx),
             ..self
@@ -215,8 +221,8 @@ pub struct Map<E: Entity> {
     pub wid: usize,
     /// Height of the grid in tiles.
     pub hgt: usize,
-    map: HashMap<(usize, usize), E::Counterpart>,
-    vfx: HashMap<(usize, usize), E::Counterpart>,
+    map: HashMap<(usize, usize), E::Tile>,
+    vfx: HashMap<(usize, usize), E::Vfx>,
     entities: HashMap<(usize, usize), E>,
 }
 
@@ -231,61 +237,47 @@ impl<E: Entity> Map<E> {
             entities: HashMap::with_capacity(wid * hgt),
         }
     }
-	
-	/// Inserts the given tile into the map.
-	pub fn insert_tile(&mut self, tile: E::Counterpart, x: usize, y: usize) {
-		self.map.insert((x, y), tile);
-	}
-	
-	/// Inserts the given entity into the map.
-	pub fn insert_entity(&mut self, ent: E, x: usize, y: usize) {
-		self.entities.insert((x, y), ent);
-	}
+
+    /// Inserts the given tile into the map.
+    pub fn insert_tile(&mut self, tile: E::Tile, x: usize, y: usize) {
+        self.map.insert((x, y), tile);
+    }
+
+    /// Inserts the given entity into the map.
+    pub fn insert_entity(&mut self, ent: E, x: usize, y: usize) {
+        self.entities.insert((x, y), ent);
+    }
 
     /// Get the tile at the given position.
     #[inline]
-    pub fn get_map(&self, x: usize, y: usize) -> Option<&E::Counterpart> {
+    pub fn get_map(&self, x: usize, y: usize) -> Option<&E::Tile> {
         self.map.get(&(x, y))
     }
 
-    /// Get the visual effect, or the tile if there is no
-    /// effect.
     #[inline]
-    pub fn get_top(&self, x: usize, y: usize) -> Option<&E::Counterpart> {
-        self.get_effect(x, y).or_else(|| self.get_map(x, y))
+    fn get_effect(&self, x: usize, y: usize) -> Option<&E::Vfx> {
+        self.vfx.get(&(x, y))
     }
-	
-	#[inline]
-	fn get_effect(&self, x: usize, y: usize) -> Option<&E::Counterpart> {
-		self.vfx.get(&(x, y))
-	}
-	
+
     /// Get the entity at the given position.
     #[inline]
     pub fn get_ent(&self, x: usize, y: usize) -> Option<&E> {
         self.entities.get(&(x, y))
     }
-	
-	/// Return all entities in the map with positions in an 
-	/// arbitrary order.
-	pub fn get_entities(&self) -> impl Iterator<Item = (&(usize, usize), &E)> {
-		self.entities.iter()
-	}
-	
+
+    /// Return all entities in the map with positions in an
+    /// arbitrary order.
+    pub fn get_entities(&self) -> impl Iterator<Item = (&(usize, usize), &E)> {
+        self.entities.iter()
+    }
+
     /// Updates all entities. If at any point, visual effects
     /// would exist, they are repeatedly updated until that is
     /// no longer the case, with a pause of delay milliseconds
-	/// between each update.
-    pub fn update(
-		&mut self,
-		win_left: usize,
-		win_top: usize,
-		win_wid: usize,
-		win_hgt: usize,
-		delay: u64,
-	) {
-		let delay = time::Duration::from_millis(delay);
-		
+    /// between each update.
+    pub fn update(&mut self, win_settings: WindowSettings, delay: u64) {
+        let delay = time::Duration::from_millis(delay);
+
         let mut e_keys: Vec<_> = self.entities.keys().copied().collect();
         e_keys.sort_by_key(|e| self.entities[e].priority());
 
@@ -327,20 +319,28 @@ impl<E: Entity> Map<E> {
                     }
                     CmdInner::MoveTo(x, y) => new_pos = Some((x, y)),
                     CmdInner::Disp(x, y) => new_pos = Some((ek.0 + x, ek.1 + y)),
-					CmdInner::Message(msg) => { 
-						execute!(io::stdout(), cursor::MoveTo(pos.0 as u16, pos.1 as u16), crossterm::style::Print(msg));
-					}
-					CmdInner::ClearRow => { 
-						execute!(io::stdout(), cursor::MoveTo(0, pos.1 as u16), terminal::Clear(terminal::ClearType::CurrentLine));
-					}
-					CmdInner::Null => (),
+                    CmdInner::Message(msg) => {
+                        let _ = execute!(
+                            io::stdout(),
+                            cursor::MoveTo(pos.0 as u16, pos.1 as u16),
+                            crossterm::style::Print(msg)
+                        );
+                    }
+                    CmdInner::ClearRow => {
+                        let _ = execute!(
+                            io::stdout(),
+                            cursor::MoveTo(0, pos.1 as u16),
+                            terminal::Clear(terminal::ClearType::CurrentLine)
+                        );
+                    }
+                    CmdInner::Null => (),
                 }
 
                 if let Some(new_pos) = new_pos {
                     let rem = self.entities.remove(&pos).unwrap();
 
                     // Check if the old_pos is in e_keys and update it if so; it would
-                    // no longer be a valid key.
+                    // no longer be a valid key otherwise.
                     if let Some(p) = e_keys.iter().position(|elem| *elem == pos) {
                         e_keys[p] = new_pos;
                     }
@@ -351,8 +351,8 @@ impl<E: Entity> Map<E> {
 
             // Repeatedly update the window until no more visual effects exist.
             loop {
-				thread::sleep(delay);
-                let win = Window::new(self, win_left, win_top, win_wid, win_hgt);
+                thread::sleep(delay);
+                let win = Window::new(self, win_settings);
                 win.display();
 
                 if self.vfx.is_empty() {
@@ -379,7 +379,8 @@ impl<E: Entity> Map<E> {
 /// A window into a map, so that only part of it has to be
 /// displayed at once. Do note that the origin is also the
 /// top left corner of the map.
-pub struct Window<'a, E: Entity> {
+#[derive(Clone, Copy)]
+pub struct WindowSettings {
     /// Leftmost co-ord of the window.
     pub left: usize,
     /// Upper most co-ord of the window.
@@ -388,27 +389,66 @@ pub struct Window<'a, E: Entity> {
     pub wid: usize,
     /// Height of the window.
     pub hgt: usize,
+    /// Number of cells by which the window is offset to the right.
+    pub x_offset: u16,
+    /// Number of cells by which the window is offset downwards.
+    pub y_offset: u16,
+}
+
+impl WindowSettings {
+    /// Create a new template with the given dimensions.
+    pub fn new(
+        left: usize,
+        top: usize,
+        wid: usize,
+        hgt: usize,
+        x_offset: u16,
+        y_offset: u16,
+    ) -> Self {
+        Self {
+            left,
+            top,
+            wid,
+            hgt,
+            x_offset,
+            y_offset,
+        }
+    }
+}
+
+/// A window into a map, so that only part of it has to be
+/// displayed at once. Do note that the origin is also the
+/// top left corner of the map.
+struct Window<'a, E: Entity> {
+    left: usize,
+    top: usize,
+    wid: usize,
+    hgt: usize,
+    x_offset: u16,
+    y_offset: u16,
     inner: &'a Map<E>,
 }
 
 #[allow(unused_must_use)]
 impl<'a, E: Entity> Window<'a, E> {
     /// Create a new window into the given map with the given dimensions.
-    pub fn new(
-        inner: &'a Map<E>,
-        left: usize,
-        top: usize,
-        wid: usize,
-        hgt: usize,
-    ) -> Window<'a, E> {
-        #[cfg(target_os = "windows")]
-        execute!(io::stdout(), cursor::SavePosition);
-        Self {
+    fn new(inner: &'a Map<E>, settings: WindowSettings) -> Window<'a, E> {
+        let WindowSettings {
             left,
             top,
             wid,
             hgt,
+            x_offset,
+            y_offset,
+        } = settings;
+        Self {
             inner,
+            left,
+            top,
+            wid,
+            hgt,
+            x_offset,
+            y_offset,
         }
     }
 
@@ -416,7 +456,7 @@ impl<'a, E: Entity> Window<'a, E> {
     /// current one.
     /// Consumes the window as it is no longer needed; the real grid should now
     /// be updated.
-    pub fn display(self) {
+    fn display(self) {
         #[cfg(target_os = "windows")]
         {
             let mut handle = io::stdout();
@@ -424,7 +464,7 @@ impl<'a, E: Entity> Window<'a, E> {
             queue!(
                 handle,
                 cursor::Hide,
-                cursor::MoveTo(0, 0),
+                cursor::MoveTo(0, self.y_offset),
                 crossterm::style::Print(self),
             );
             handle.flush();
@@ -436,19 +476,20 @@ impl<'a, E: Entity> Window<'a, E> {
 
 impl<E: Entity> fmt::Display for Window<'_, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let def: E::Counterpart = Default::default();
+        let def: E::Tile = Default::default();
+        let spaces = String::from_utf8(vec![b' '; self.x_offset.into()]).unwrap();
 
-        writeln!(f)?;
         for y in self.top..self.top + self.hgt {
+            write!(f, "{spaces}")?;
             for x in self.left..self.left + self.wid {
                 match self.get_effect(x, y) {
                     Some(v) => write!(f, "{v}")?,
                     None => match self.get_ent(x, y) {
                         Some(e) => write!(f, "{e}")?,
                         None => match self.get_map(x, y) {
-							Some(t) => write!(f, "{t}")?,
-							None => write!(f, "{def}")?,
-						},
+                            Some(t) => write!(f, "{t}")?,
+                            None => write!(f, "{def}")?,
+                        },
                     },
                 };
             }
