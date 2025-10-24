@@ -2,7 +2,7 @@
 
 #[cfg(target_os = "windows")]
 use crossterm::{cursor, execute, queue, terminal};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::{fmt, ops, thread, time};
 
@@ -16,9 +16,9 @@ pub trait Tile: fmt::Display + Default {}
 /// Trait for types that are able to be used as visual effects in a [Map].
 /// Should never print multiple characters or a newline.
 pub trait Vfx: fmt::Display {
-    /// Update the tile if it is a visual effect. Returns true
+    /// Update the visual effect. Returns true
     /// if it should be deleted, otherwise returns false.
-    fn update_vfx(&mut self) -> bool;
+    fn update(&mut self) -> bool;
 }
 
 /// Types that actively do something in a [Map] instead of just being
@@ -26,8 +26,8 @@ pub trait Vfx: fmt::Display {
 pub trait Entity: fmt::Display {
     /// The Tile type associated with this entity.
     type Tile: Tile;
-	/// The visual effect type associated with this entity.
-	type Vfx: Vfx;
+    /// The visual effect type associated with this entity.
+    type Vfx: Vfx;
     /// The printable type for displaying information used by this entity.
     type Msg: fmt::Display;
 
@@ -362,7 +362,7 @@ impl<E: Entity> Map<E> {
 
                     for (p, vf) in self.vfx.iter_mut() {
                         // Update and make a note of those that no longer need to be.
-                        if !vf.update_vfx() {
+                        if vf.update() {
                             dead.push(*p);
                         }
                     }
@@ -373,6 +373,96 @@ impl<E: Entity> Map<E> {
                 }
             }
         }
+    }
+
+    /// Uses the A* algorithm to find the shortest path from the start to
+    /// the goal. Will not find a path if there isn't one with a length lower
+    /// than dist limit.
+    pub fn pathfind<Ti: Fn(&E::Tile) -> bool>(
+        &self,
+        start: (usize, usize),
+        goal: (usize, usize),
+        dist_lim: usize,
+        walkable: Ti,
+    ) -> Option<Vec<(usize, usize)>> {
+        // Use the manhattan distance as the heuristic function.
+        let h = |p: (usize, usize)| p.0.abs_diff(goal.0) + p.1.abs_diff(goal.1);
+        let neighbours = |mut p: (usize, usize)| {
+            let mut n = Vec::new();
+
+            p.0 += 1;
+            n.push(p);
+            p.0 -= 2;
+            n.push(p);
+            p.0 += 1;
+            p.1 += 1;
+            n.push(p);
+            p.1 -= 2;
+            n.push(p);
+            n
+        };
+
+        let mut open_set = HashSet::new();
+        open_set.insert(start);
+
+        let mut came_from = HashMap::new();
+
+        let mut g_score = HashMap::new();
+        g_score.insert(start, 0);
+
+        let mut f_score: HashMap<(usize, usize), usize> = HashMap::new();
+        f_score.insert(start, 0);
+
+        while !open_set.is_empty() {
+			// Get the path with minimal distance from start and estimated distance from end.
+            let mut cur = *f_score
+                .iter()
+                .min_by_key(|(p, s)| {
+                    if open_set.contains(&p) {
+                        **s
+                    } else {
+                        usize::MAX
+                    }
+                })
+                .unwrap()
+                .0;
+            open_set.remove(&cur);
+
+            if cur == goal {
+				if f_score[&cur] > dist_lim {
+					return None;
+				}
+                let mut total_path = vec![cur];
+                while came_from.contains_key(&cur) {
+                    cur = came_from[&cur];
+                    total_path.insert(0, cur);
+                }
+                return Some(total_path);
+            }
+
+            for neighbour in neighbours(cur) {
+				// If you can't go there, don't.
+                if let Some(ti) = self.get_map(neighbour.0, neighbour.1) {
+                    if !walkable(ti) {
+						continue;
+					}
+                } else {
+					continue
+				}
+
+                let tentative = g_score.get(&cur).copied().unwrap_or(dist_lim) + 1;
+				
+                if tentative < g_score.get(&neighbour).copied().unwrap_or(dist_lim) {
+                    came_from.insert(neighbour, cur);
+
+                    g_score.insert(neighbour, tentative);
+                    f_score.insert(neighbour, tentative + h(neighbour));
+					open_set.insert(neighbour);
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -386,9 +476,9 @@ pub struct WindowSettings {
     /// Upper most co-ord of the window.
     pub top: usize,
     /// Width of the window.
-    pub wid: usize,
+    pub wid: u16,
     /// Height of the window.
-    pub hgt: usize,
+    pub hgt: u16,
     /// Number of cells by which the window is offset to the right.
     pub x_offset: u16,
     /// Number of cells by which the window is offset downwards.
@@ -400,8 +490,8 @@ impl WindowSettings {
     pub fn new(
         left: usize,
         top: usize,
-        wid: usize,
-        hgt: usize,
+        wid: u16,
+        hgt: u16,
         x_offset: u16,
         y_offset: u16,
     ) -> Self {
@@ -414,6 +504,18 @@ impl WindowSettings {
             y_offset,
         }
     }
+	
+	/// Relocates the window's top left corner to the given position.
+	pub fn move_to(&mut self, x: usize, y: usize) {
+		self.left = x;
+		self.top = y;
+	}
+	
+	/// Centres the window on the given position.
+	pub fn centre_on(&mut self, x: usize, y: usize) {
+		self.left = x - (self.wid / 2) as usize;
+		self.top = y - (self.hgt / 2) as usize;
+	}
 }
 
 /// A window into a map, so that only part of it has to be
@@ -422,8 +524,8 @@ impl WindowSettings {
 struct Window<'a, E: Entity> {
     left: usize,
     top: usize,
-    wid: usize,
-    hgt: usize,
+    wid: u16,
+    hgt: u16,
     x_offset: u16,
     y_offset: u16,
     inner: &'a Map<E>,
@@ -478,10 +580,12 @@ impl<E: Entity> fmt::Display for Window<'_, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let def: E::Tile = Default::default();
         let spaces = String::from_utf8(vec![b' '; self.x_offset.into()]).unwrap();
-
-        for y in self.top..self.top + self.hgt {
+		let wid_usize = self.wid as usize;
+		let hgt_usize = self.hgt as usize;
+		
+        for y in self.top..self.top + hgt_usize {
             write!(f, "{spaces}")?;
-            for x in self.left..self.left + self.wid {
+            for x in self.left..self.left + wid_usize {
                 match self.get_effect(x, y) {
                     Some(v) => write!(f, "{v}")?,
                     None => match self.get_ent(x, y) {
