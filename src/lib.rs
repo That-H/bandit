@@ -2,9 +2,11 @@
 
 #[cfg(target_os = "windows")]
 use crossterm::{cursor, execute, queue, terminal};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
-use std::{fmt, ops, thread, time};
+use std::{cmp, fmt, ops};
+
+pub use point::Point;
 
 /// Trait for types that are able to be used as tiles in a [Map].
 /// By implementing this trait for a type you are asserting that its
@@ -33,13 +35,14 @@ pub trait Entity: fmt::Display {
 
     /// Queue everything that needs to change as a result of this entity
     /// after a frame. Pos is the current position of the entity in the map.
-    fn update(&self, cmd: &mut Commands<'_, Self>, pos: (usize, usize))
+    fn update(&self, cmd: &mut Commands<'_, Self>, pos: Point)
     where
         Self: Sized;
 
-    /// Returns a value used for determining update order; a lower value means
-    /// the entity should update sooner than other entities.
-    fn priority(&self) -> usize;
+    /// Returns a value used for determining update order; a higher value means
+    /// the entity should update sooner than other entities. A priority of 0
+	/// means the entity should not be updated.
+    fn priority(&self) -> u32;
 }
 
 /// Allows one to queue things to do to a [Map]. Can be dereferenced into a
@@ -73,13 +76,17 @@ impl<'a, E: Entity> Commands<'a, E> {
 
 type EditTile<T> = Box<dyn Fn(&mut T)>;
 type EditEntity<E> = Box<dyn Fn(&mut E)>;
+type MessageLaterTile<E> = Box<dyn Fn(&<E as Entity>::Tile) -> <E as Entity>::Msg>;
+type MessageLaterEnt<E> = Box<dyn Fn(&E) -> <E as Entity>::Msg>;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 enum Pos {
-    Other(usize, usize),
+    Other(Point),
+	#[default]
     This,
 }
 
+#[derive(Default)]
 enum CmdInner<E: Entity> {
     ModTile(EditTile<E::Tile>),
     ModEnt(EditEntity<E>),
@@ -88,10 +95,13 @@ enum CmdInner<E: Entity> {
     CreateTile(E::Tile),
     CreateVfx(E::Vfx),
     CreateEnt(E),
-    MoveTo(usize, usize),
-    Disp(usize, usize),
+    MoveTo(Point),
+    Disp(Point),
     Message(E::Msg),
+	MessageLaterTile(MessageLaterTile<E>),
+	MessageLaterEnt(MessageLaterEnt<E>),
     ClearRow,
+	#[default]
     Null,
 }
 
@@ -102,25 +112,23 @@ enum CmdInner<E: Entity> {
 /// be created from the Cmd, and vice versa.
 pub struct Cmd<E: Entity> {
     pos: Pos,
+	get_pos: Point,
     action: CmdInner<E>,
 }
 
 impl<E: Entity> Cmd<E> {
     /// Starts building a Cmd at the given pos.
-    pub fn new_on(x: usize, y: usize) -> Self {
+    pub fn new_on(pos: Point) -> Self {
         Self {
-            pos: Pos::Other(x, y),
-            action: CmdInner::Null,
+            pos: Pos::Other(pos),
+			..Default::default()
         }
     }
 
     /// Starts building a Cmd at this position, i.e. the position
     /// of the current entity.
     pub fn new_here() -> Self {
-        Self {
-            pos: Pos::This,
-            action: CmdInner::Null,
-        }
+        Self::default()
     }
 
     /// Sets the next message to display. The position the message is displayed
@@ -130,6 +138,26 @@ impl<E: Entity> Cmd<E> {
     pub fn display_message(self, msg: E::Msg) -> Self {
         Self {
             action: CmdInner::Message(msg),
+            ..self
+        }
+    }
+	
+	/// Computes the message to display using the provided closure given
+	/// the tile at get_pos.
+    pub fn display_message_later_ent(self, msg_later: MessageLaterEnt<E>, get_pos: Point) -> Self {
+        Self {
+            action: CmdInner::MessageLaterEnt(msg_later),
+			get_pos,
+            ..self
+        }
+    }
+	
+	/// Computes the message to display using the provided closure given
+	/// the entity at the position of the cmd.
+    pub fn display_message_later_tile(self, msg_later: MessageLaterTile<E>, get_pos: Point) -> Self {
+        Self {
+            action: CmdInner::MessageLaterTile(msg_later),
+			get_pos,
             ..self
         }
     }
@@ -143,17 +171,17 @@ impl<E: Entity> Cmd<E> {
     }
 
     /// Sets the position to move the entity to.
-    pub fn move_to(self, x: usize, y: usize) -> Self {
+    pub fn move_to(self, pos: Point) -> Self {
         Self {
-            action: CmdInner::MoveTo(x, y),
+            action: CmdInner::MoveTo(pos),
             ..self
         }
     }
 
     /// Sets the vector by which to displace the entity.
-    pub fn displace(self, x: usize, y: usize) -> Self {
+    pub fn displace(self, disp: Point) -> Self {
         Self {
-            action: CmdInner::Disp(x, y),
+            action: CmdInner::Disp(disp),
             ..self
         }
     }
@@ -215,15 +243,25 @@ impl<E: Entity> Cmd<E> {
     }
 }
 
+impl<E: Entity> Default for Cmd<E> {
+	fn default() -> Self {
+		Self {
+			pos: Pos::default(),
+			get_pos: Point::ORIGIN,
+			action: CmdInner::default(),
+		}
+	}
+}
+
 /// Contains all tiles in the game grid.
 pub struct Map<E: Entity> {
     /// Width of the grid in tiles.
     pub wid: usize,
     /// Height of the grid in tiles.
     pub hgt: usize,
-    map: HashMap<(usize, usize), E::Tile>,
-    vfx: HashMap<(usize, usize), E::Vfx>,
-    entities: HashMap<(usize, usize), E>,
+    map: HashMap<Point, E::Tile>,
+    vfx: HashMap<Point, E::Vfx>,
+    entities: HashMap<Point, E>,
 }
 
 impl<E: Entity> Map<E> {
@@ -239,230 +277,263 @@ impl<E: Entity> Map<E> {
     }
 
     /// Inserts the given tile into the map.
-    pub fn insert_tile(&mut self, tile: E::Tile, x: usize, y: usize) {
-        self.map.insert((x, y), tile);
+    pub fn insert_tile(&mut self, tile: E::Tile, pos: Point) {
+        self.map.insert(pos, tile);
     }
 
     /// Inserts the given entity into the map.
-    pub fn insert_entity(&mut self, ent: E, x: usize, y: usize) {
-        self.entities.insert((x, y), ent);
+    pub fn insert_entity(&mut self, ent: E, pos: Point) {
+        self.entities.insert(pos, ent);
     }
 
     /// Get the tile at the given position.
     #[inline]
-    pub fn get_map(&self, x: usize, y: usize) -> Option<&E::Tile> {
-        self.map.get(&(x, y))
+    pub fn get_map(&self, pos: Point) -> Option<&E::Tile> {
+        self.map.get(&pos)
     }
 
     #[inline]
-    fn get_effect(&self, x: usize, y: usize) -> Option<&E::Vfx> {
-        self.vfx.get(&(x, y))
+    fn get_effect(&self, pos: Point) -> Option<&E::Vfx> {
+        self.vfx.get(&pos)
     }
 
     /// Get the entity at the given position.
     #[inline]
-    pub fn get_ent(&self, x: usize, y: usize) -> Option<&E> {
-        self.entities.get(&(x, y))
+    pub fn get_ent(&self, pos: Point) -> Option<&E> {
+        self.entities.get(&pos)
     }
 
     /// Return all entities in the map with positions in an
     /// arbitrary order.
-    pub fn get_entities(&self) -> impl Iterator<Item = (&(usize, usize), &E)> {
+    pub fn get_entities(&self) -> impl Iterator<Item = (&Point, &E)> {
         self.entities.iter()
     }
+	
+	/// Returns the entity (and co-ordinates) with the highest priority.
+	/// Will not return anything if there are no entities with a priority
+	/// above 0.
+	pub fn get_highest_priority(&self) -> Option<(&Point, &E)> {
+		self.entities.iter().filter(|(_k, e)| e.priority() > 0).max_by_key(|(_k, e)| e.priority())
+	}
+	
+    /// Updates the highest priority entity. Returns whether or not any 
+	/// entities were updated. Entities will not be updated if there aren't
+	/// any with a priority above 0.
+    pub fn update(&mut self) -> bool {
+		if let Some((ek, ent)) = self.get_highest_priority() { 
+			let mut comms = Commands::new(self);
+			
+			// Convenience.
+			let mut ek = *ek;
+			
+			// Get and apply changes.
+			ent.update(&mut comms, ek);
+			for cmd in comms.cmds {
+				let pos = match cmd.pos {
+					Pos::Other(pos) => pos,
+					Pos::This => ek,
+				};
 
-    /// Updates all entities. If at any point, visual effects
-    /// would exist, they are repeatedly updated until that is
-    /// no longer the case, with a pause of delay milliseconds
-    /// between each update.
-    pub fn update(&mut self, win_settings: WindowSettings, delay: u64) {
-        let delay = time::Duration::from_millis(delay);
+				let mut new_pos = None;
 
-        let mut e_keys: Vec<_> = self.entities.keys().copied().collect();
-        e_keys.sort_by_key(|e| self.entities[e].priority());
+				match cmd.action {
+					CmdInner::CreateTile(t) => {
+						self.map.insert(pos, t);
+					}
+					CmdInner::CreateVfx(v) => {
+						self.vfx.insert(pos, v);
+					}
+					CmdInner::CreateEnt(e) => {
+						self.entities.insert(pos, e);
+					}
+					CmdInner::ModTile(f) => {
+						f(self.map.get_mut(&pos).expect("No tile?"));
+					}
+					CmdInner::ModEnt(f) => {
+						f(self.entities.get_mut(&pos).expect("No entity?"));
+					}
+					CmdInner::DelTile => {
+						self.map.remove(&pos);
+					}
+					CmdInner::DelEnt => {
+						self.entities.remove(&pos);
+					}
+					CmdInner::MoveTo(pos) => { 
+						new_pos = Some(pos);
+						ek = pos;
+					},
+					CmdInner::Disp(disp) => new_pos = Some(ek + disp),
+					CmdInner::Message(msg) => {
+						let _ = execute!(
+							io::stdout(),
+							cursor::MoveTo(pos.x as u16, pos.y as u16),
+							crossterm::style::Print(msg)
+						);
+					}
+					CmdInner::MessageLaterEnt(msg_later) => {
+						let _ = execute!(
+							io::stdout(),
+							cursor::MoveTo(pos.x as u16, pos.y as u16),
+							crossterm::style::Print(msg_later(self.get_ent(cmd.get_pos).expect("No entity?")))
+						);
+					}
+					CmdInner::MessageLaterTile(msg_later) => {
+						let _ = execute!(
+							io::stdout(),
+							cursor::MoveTo(pos.x as u16, pos.y as u16),
+							crossterm::style::Print(msg_later(self.get_map(cmd.get_pos).expect("No tile?")))
+						);
+					}
+					CmdInner::ClearRow => {
+						let _ = execute!(
+							io::stdout(),
+							cursor::MoveTo(0, pos.y as u16),
+							terminal::Clear(terminal::ClearType::CurrentLine)
+						);
+					}
+					CmdInner::Null => (),
+				}
 
-        for i in 0..e_keys.len() {
-            let ek = e_keys[i];
-            let mut comms = Commands::new(self);
+				if let Some(new_pos) = new_pos {
+					// Take it out of the old place and put it in the new place if necessary.
+					let rem = self.entities.remove(&pos).unwrap();
 
-            // Get and apply changes.
-            self.entities[&ek].update(&mut comms, ek);
-            for cmd in comms.cmds {
-                let pos = match cmd.pos {
-                    Pos::Other(x, y) => (x, y),
-                    Pos::This => ek,
-                };
-
-                let mut new_pos = None;
-
-                match cmd.action {
-                    CmdInner::CreateTile(t) => {
-                        self.map.insert(pos, t);
-                    }
-                    CmdInner::CreateVfx(v) => {
-                        self.vfx.insert(pos, v);
-                    }
-                    CmdInner::CreateEnt(e) => {
-                        self.entities.insert(pos, e);
-                    }
-                    CmdInner::ModTile(f) => {
-                        f(self.map.get_mut(&pos).expect("No tile?"));
-                    }
-                    CmdInner::ModEnt(f) => {
-                        f(self.entities.get_mut(&pos).expect("No tile?"));
-                    }
-                    CmdInner::DelTile => {
-                        self.map.remove(&pos);
-                    }
-                    CmdInner::DelEnt => {
-                        self.entities.remove(&pos);
-                    }
-                    CmdInner::MoveTo(x, y) => new_pos = Some((x, y)),
-                    CmdInner::Disp(x, y) => new_pos = Some((ek.0 + x, ek.1 + y)),
-                    CmdInner::Message(msg) => {
-                        let _ = execute!(
-                            io::stdout(),
-                            cursor::MoveTo(pos.0 as u16, pos.1 as u16),
-                            crossterm::style::Print(msg)
-                        );
-                    }
-                    CmdInner::ClearRow => {
-                        let _ = execute!(
-                            io::stdout(),
-                            cursor::MoveTo(0, pos.1 as u16),
-                            terminal::Clear(terminal::ClearType::CurrentLine)
-                        );
-                    }
-                    CmdInner::Null => (),
-                }
-
-                if let Some(new_pos) = new_pos {
-                    let rem = self.entities.remove(&pos).unwrap();
-
-                    // Check if the old_pos is in e_keys and update it if so; it would
-                    // no longer be a valid key otherwise.
-                    if let Some(p) = e_keys.iter().position(|elem| *elem == pos) {
-                        e_keys[p] = new_pos;
-                    }
-
-                    self.entities.insert(new_pos, rem);
-                }
-            }
-
-            // Repeatedly update the window until no more visual effects exist.
-            loop {
-                thread::sleep(delay);
-                let win = Window::new(self, win_settings);
-                win.display();
-
-                if self.vfx.is_empty() {
-                    break;
-                } else {
-                    let mut dead = Vec::new();
-
-                    for (p, vf) in self.vfx.iter_mut() {
-                        // Update and make a note of those that no longer need to be.
-                        if vf.update() {
-                            dead.push(*p);
-                        }
-                    }
-
-                    for d in dead {
-                        self.vfx.remove(&d);
-                    }
-                }
-            }
-        }
+					self.entities.insert(new_pos, rem);
+				}
+			}
+			true
+        } else {
+			false
+		}
     }
+	
+	/// Update all visual effects currently in the map, and remove any 
+	/// that return true when updated. Return the number of vfx left.
+	pub fn update_vfx(&mut self) -> usize {
+		let mut dead = Vec::new();
 
+		for (p, vf) in self.vfx.iter_mut() {
+			// Update and make a note of those that no longer need to be.
+			if vf.update() {
+				dead.push(*p);
+			}
+		}
+
+		for d in dead {
+			self.vfx.remove(&d);
+		}
+		
+		self.vfx.len()
+	}
+	
     /// Uses the A* algorithm to find the shortest path from the start to
     /// the goal. Will not find a path if there isn't one with a length lower
-    /// than dist limit.
+    /// than dist limit. Positions in the returned path will not contain entities,
+	/// with the exception of the goal node that might.
     pub fn pathfind<Ti: Fn(&E::Tile) -> bool>(
         &self,
-        start: (usize, usize),
-        goal: (usize, usize),
+        start: Point,
+        goals: impl IntoIterator<Item = Point>,
         dist_lim: usize,
         walkable: Ti,
-    ) -> Option<Vec<(usize, usize)>> {
+		neighbours: &[Point],
+    ) -> Option<Vec<Point>> {
+		let goals: Vec<Point> = goals.into_iter().collect();
+		
+		assert!(goals.len() > 0, "No goal nodes provided to pathfind to.");
+		
         // Use the manhattan distance as the heuristic function.
-        let h = |p: (usize, usize)| p.0.abs_diff(goal.0) + p.1.abs_diff(goal.1);
-        let neighbours = |mut p: (usize, usize)| {
-            let mut n = Vec::new();
+        let h = |p: Point| goals.iter().map(|pos| pos.manhattan_dist(p)).min().unwrap();
 
-            p.0 += 1;
-            n.push(p);
-            p.0 -= 2;
-            n.push(p);
-            p.0 += 1;
-            p.1 += 1;
-            n.push(p);
-            p.1 -= 2;
-            n.push(p);
-            n
-        };
-
-        let mut open_set = HashSet::new();
-        open_set.insert(start);
+        let mut open_set = BinaryHeap::new();
+        open_set.push(PathItem { pos: start, f_score: 0 });
 
         let mut came_from = HashMap::new();
 
         let mut g_score = HashMap::new();
         g_score.insert(start, 0);
 
-        let mut f_score: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut f_score: HashMap<Point, usize> = HashMap::new();
         f_score.insert(start, 0);
 
-        while !open_set.is_empty() {
-			// Get the path with minimal distance from start and estimated distance from end.
-            let mut cur = *f_score
-                .iter()
-                .min_by_key(|(p, s)| {
-                    if open_set.contains(&p) {
-                        **s
-                    } else {
-                        usize::MAX
-                    }
-                })
-                .unwrap()
-                .0;
-            open_set.remove(&cur);
-
-            if cur == goal {
-				if f_score[&cur] > dist_lim {
-					return None;
-				}
-                let mut total_path = vec![cur];
-                while came_from.contains_key(&cur) {
-                    cur = came_from[&cur];
-                    total_path.insert(0, cur);
-                }
-                return Some(total_path);
-            }
-
-            for neighbour in neighbours(cur) {
+        while let Some(cur) = open_set.pop() {
+            for neighbour in neighbours.iter() {
+				let mut cur_pos = cur.pos;
+				let cost = (neighbour.x.abs() + neighbour.y.abs()) as usize;
+				let neighbour = *neighbour + cur_pos;	
+				
+				let win = goals.contains(&neighbour);
+				
 				// If you can't go there, don't.
-                if let Some(ti) = self.get_map(neighbour.0, neighbour.1) {
-                    if !walkable(ti) {
+                if let Some(ti) = self.get_map(neighbour) {
+                    if !win && (!walkable(ti) || self.get_ent(neighbour).is_some()) {
 						continue;
 					}
                 } else {
-					continue
+					continue;
 				}
 
-                let tentative = g_score.get(&cur).copied().unwrap_or(dist_lim) + 1;
+                let tentative = g_score.get(&cur_pos).copied().unwrap_or(dist_lim) + 1;
 				
                 if tentative < g_score.get(&neighbour).copied().unwrap_or(dist_lim) {
-                    came_from.insert(neighbour, cur);
+                    came_from.insert(neighbour, cur_pos);
 
                     g_score.insert(neighbour, tentative);
-                    f_score.insert(neighbour, tentative + h(neighbour));
-					open_set.insert(neighbour);
+					// Ok to cast as manhattan_dist is always positive.
+					let this_f = tentative + h(neighbour) as usize;
+                    f_score.insert(neighbour, this_f);
+					open_set.push(PathItem { pos: neighbour, f_score: this_f });
                 }
+				
+				if win {
+					if f_score[&neighbour] > dist_lim {
+						return None;
+					}
+					
+					cur_pos = neighbour;
+					
+					let mut total_path = vec![cur_pos];
+					while came_from.contains_key(&cur_pos) {
+						cur_pos = came_from[&cur_pos];
+						total_path.insert(0, cur_pos);
+					}
+					return Some(total_path);
+				}
             }
         }
 
         None
+    }
+	
+	/// Display this map using a window with the given settings.
+	pub fn display_with(&self, settings: WindowSettings) {
+		let win = Window::new(self, settings);
+		
+		win.display();
+	}
+}
+
+#[derive(Clone, Copy, Eq)]
+struct PathItem {
+	pos: Point,
+	f_score: usize,
+}
+
+impl PartialEq for PathItem {
+	fn eq(&self, other: &Self) -> bool {
+		self.f_score == other.f_score
+	}
+}
+
+impl Ord for PathItem {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        other.f_score.cmp(&self.f_score)
+    }
+}
+
+impl PartialOrd for PathItem {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -471,10 +542,8 @@ impl<E: Entity> Map<E> {
 /// top left corner of the map.
 #[derive(Clone, Copy)]
 pub struct WindowSettings {
-    /// Leftmost co-ord of the window.
-    pub left: usize,
-    /// Upper most co-ord of the window.
-    pub top: usize,
+    /// Position of the top left corner of the window.
+    pub top_left: Point,
     /// Width of the window.
     pub wid: u16,
     /// Height of the window.
@@ -488,16 +557,14 @@ pub struct WindowSettings {
 impl WindowSettings {
     /// Create a new template with the given dimensions.
     pub fn new(
-        left: usize,
-        top: usize,
+        top_left: Point,
         wid: u16,
         hgt: u16,
         x_offset: u16,
         y_offset: u16,
     ) -> Self {
         Self {
-            left,
-            top,
+            top_left,
             wid,
             hgt,
             x_offset,
@@ -506,15 +573,13 @@ impl WindowSettings {
     }
 	
 	/// Relocates the window's top left corner to the given position.
-	pub fn move_to(&mut self, x: usize, y: usize) {
-		self.left = x;
-		self.top = y;
+	pub fn move_to(&mut self, pos: Point) {
+		self.top_left = pos;
 	}
 	
 	/// Centres the window on the given position.
-	pub fn centre_on(&mut self, x: usize, y: usize) {
-		self.left = x - (self.wid / 2) as usize;
-		self.top = y - (self.hgt / 2) as usize;
+	pub fn centre_on(&mut self, pos: Point) {
+		self.top_left = pos - Point::from((self.wid / 2, self.hgt / 2));
 	}
 }
 
@@ -522,8 +587,7 @@ impl WindowSettings {
 /// displayed at once. Do note that the origin is also the
 /// top left corner of the map.
 struct Window<'a, E: Entity> {
-    left: usize,
-    top: usize,
+    top_left: Point,
     wid: u16,
     hgt: u16,
     x_offset: u16,
@@ -536,8 +600,7 @@ impl<'a, E: Entity> Window<'a, E> {
     /// Create a new window into the given map with the given dimensions.
     fn new(inner: &'a Map<E>, settings: WindowSettings) -> Window<'a, E> {
         let WindowSettings {
-            left,
-            top,
+            top_left,
             wid,
             hgt,
             x_offset,
@@ -545,8 +608,7 @@ impl<'a, E: Entity> Window<'a, E> {
         } = settings;
         Self {
             inner,
-            left,
-            top,
+            top_left,
             wid,
             hgt,
             x_offset,
@@ -580,17 +642,16 @@ impl<E: Entity> fmt::Display for Window<'_, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let def: E::Tile = Default::default();
         let spaces = String::from_utf8(vec![b' '; self.x_offset.into()]).unwrap();
-		let wid_usize = self.wid as usize;
-		let hgt_usize = self.hgt as usize;
 		
-        for y in self.top..self.top + hgt_usize {
+        for y in self.top_left.y..self.top_left.y + self.hgt as i32 {
             write!(f, "{spaces}")?;
-            for x in self.left..self.left + wid_usize {
-                match self.get_effect(x, y) {
+            for x in self.top_left.x..self.top_left.x + self.wid as i32 {
+				let pos = Point::from((x, y));
+                match self.get_effect(pos) {
                     Some(v) => write!(f, "{v}")?,
-                    None => match self.get_ent(x, y) {
+                    None => match self.get_ent(pos) {
                         Some(e) => write!(f, "{e}")?,
-                        None => match self.get_map(x, y) {
+                        None => match self.get_map(pos) {
                             Some(t) => write!(f, "{t}")?,
                             None => write!(f, "{def}")?,
                         },
