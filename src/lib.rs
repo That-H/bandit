@@ -2,7 +2,7 @@
 
 #[cfg(target_os = "windows")]
 use crossterm::{cursor, execute, queue, terminal};
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::io::{self, Write};
 use std::{cmp, fmt, ops};
 
@@ -16,11 +16,16 @@ pub use point::Point;
 pub trait Tile: fmt::Display + Default {}
 
 /// Trait for types that are able to be used as visual effects in a [Map].
-/// Should never print multiple characters or a newline.
-pub trait Vfx: fmt::Display {
+pub trait Vfx {
+	type Txt: fmt::Display;
+	
     /// Update the visual effect. Returns true
     /// if it should be deleted, otherwise returns false.
     fn update(&mut self) -> bool;
+	
+	/// Takes as input the character at the position of the effect
+	/// and returns a new message.
+	fn modify_txt(&self, txt: &str) -> Self::Txt;
 }
 
 /// Types that actively do something in a [Map] instead of just being
@@ -473,7 +478,11 @@ impl<E: Entity> Map<E> {
 					continue;
 				}
 
-                let tentative = g_score.get(&cur_pos).copied().unwrap_or(dist_lim) + 1;
+                let tentative = g_score.get(&cur_pos).copied().unwrap_or(dist_lim) + cost;
+				
+				if tentative > dist_lim {
+					continue;
+				}
 				
                 if tentative < g_score.get(&neighbour).copied().unwrap_or(dist_lim) {
                     came_from.insert(neighbour, cur_pos);
@@ -486,10 +495,6 @@ impl<E: Entity> Map<E> {
                 }
 				
 				if win {
-					if f_score[&neighbour] > dist_lim {
-						return None;
-					}
-					
 					cur_pos = neighbour;
 					
 					let mut total_path = vec![cur_pos];
@@ -579,7 +584,7 @@ impl WindowSettings {
 	
 	/// Centres the window on the given position.
 	pub fn centre_on(&mut self, pos: Point) {
-		self.top_left = pos - Point::from((self.wid / 2, self.hgt / 2));
+		self.top_left = pos - Point::new(self.wid as i32 / 2, -(self.hgt as i32) / 2);
 	}
 }
 
@@ -640,22 +645,23 @@ impl<'a, E: Entity> Window<'a, E> {
 
 impl<E: Entity> fmt::Display for Window<'_, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let def: E::Tile = Default::default();
+        let def = E::Tile::default().to_string();
         let spaces = String::from_utf8(vec![b' '; self.x_offset.into()]).unwrap();
 		
-        for y in self.top_left.y..self.top_left.y + self.hgt as i32 {
+        for y in (self.top_left.y - self.hgt as i32..self.top_left.y).rev() {
             write!(f, "{spaces}")?;
             for x in self.top_left.x..self.top_left.x + self.wid as i32 {
 				let pos = Point::from((x, y));
+				let txt = match self.get_ent(pos) {
+					Some(e) => e.to_string(),
+					None => match self.get_map(pos) {
+						Some(t) => t.to_string(),
+						None => def.clone(),
+					},
+				};
                 match self.get_effect(pos) {
-                    Some(v) => write!(f, "{v}")?,
-                    None => match self.get_ent(pos) {
-                        Some(e) => write!(f, "{e}")?,
-                        None => match self.get_map(pos) {
-                            Some(t) => write!(f, "{t}")?,
-                            None => write!(f, "{def}")?,
-                        },
-                    },
+                    Some(v) => write!(f, "{}", v.modify_txt(&txt))?,
+                    None => write!(f, "{txt}")?,
                 };
             }
             writeln!(f)?;
