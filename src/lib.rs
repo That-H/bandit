@@ -433,9 +433,9 @@ impl<E: Entity> Map<E> {
 	
     /// Uses the A* algorithm to find the shortest path from the start to
     /// the goal. Will not find a path if there isn't one with a length lower
-    /// than dist limit. Positions in the returned path will not contain entities,
-	/// with the exception of the goal node that might.
-    pub fn pathfind<Ti: Fn(&E::Tile) -> bool>(
+    /// than dist limit. Uses the walkable predicate to decide whether or not a
+	/// a tile is allowed to be part of the path.
+    pub fn pathfind<Ti: Fn(Point) -> bool>(
         &self,
         start: Point,
         goals: impl IntoIterator<Item = Point>,
@@ -445,7 +445,9 @@ impl<E: Entity> Map<E> {
     ) -> Option<Vec<Point>> {
 		let goals: Vec<Point> = goals.into_iter().collect();
 		
-		assert!(goals.len() > 0, "No goal nodes provided to pathfind to.");
+		if goals.len() == 0 {
+			return None;
+		}
 		
         // Use the manhattan distance as the heuristic function.
         let h = |p: Point| goals.iter().map(|pos| pos.manhattan_dist(p)).min().unwrap();
@@ -470,13 +472,9 @@ impl<E: Entity> Map<E> {
 				let win = goals.contains(&neighbour);
 				
 				// If you can't go there, don't.
-                if let Some(ti) = self.get_map(neighbour) {
-                    if !win && (!walkable(ti) || self.get_ent(neighbour).is_some()) {
-						continue;
-					}
-                } else {
+				if !walkable(neighbour) {
 					continue;
-				}
+                }
 
                 let tentative = g_score.get(&cur_pos).copied().unwrap_or(dist_lim) + cost;
 				
