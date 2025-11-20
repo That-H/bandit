@@ -1,12 +1,13 @@
 //! Library for handling traditional roguelike games.
 
-#[cfg(target_os = "windows")]
-use crossterm::{cursor, execute, queue, terminal};
 use std::collections::{BinaryHeap, HashMap, VecDeque};
-use std::io::{self, Write};
 use std::{cmp, fmt, ops};
+use fmt::Write;
 
 pub use point::Point;
+
+#[cfg(feature = "windowed")]
+pub use windowed;
 
 /// Trait for types that are able to be used as tiles in a [Map].
 /// By implementing this trait for a type you are asserting that its
@@ -86,8 +87,6 @@ impl<'a, E: Entity> Commands<'a, E> {
 
 type EditTile<T> = Box<dyn Fn(&mut T)>;
 type EditEntity<E> = Box<dyn Fn(&mut E)>;
-type MessageLaterTile<E> = Box<dyn Fn(&<E as Entity>::Tile) -> <E as Entity>::Msg>;
-type MessageLaterEnt<E> = Box<dyn Fn(&E) -> <E as Entity>::Msg>;
 
 #[derive(Clone, Copy, Default)]
 enum Pos {
@@ -107,10 +106,6 @@ enum CmdInner<E: Entity> {
     CreateEnt(E),
     MoveTo(Point),
     Disp(Point),
-    Message(E::Msg),
-	MessageLaterTile(MessageLaterTile<E>),
-	MessageLaterEnt(MessageLaterEnt<E>),
-    ClearRow,
 	#[default]
     Null,
 }
@@ -122,7 +117,6 @@ enum CmdInner<E: Entity> {
 /// be created from the Cmd, and vice versa.
 pub struct Cmd<E: Entity> {
     pos: Pos,
-	get_pos: Point,
     action: CmdInner<E>,
 }
 
@@ -139,45 +133,6 @@ impl<E: Entity> Cmd<E> {
     /// of the current entity.
     pub fn new_here() -> Self {
         Self::default()
-    }
-
-    /// Sets the next message to display. The position the message is displayed
-    /// at is the co-ordinates provided applied to the terminal window.
-    /// Not recommended to display messages on the actual map.
-    /// Also not automatically cleared.
-    pub fn display_message(self, msg: E::Msg) -> Self {
-        Self {
-            action: CmdInner::Message(msg),
-            ..self
-        }
-    }
-	
-	/// Computes the message to display using the provided closure given
-	/// the tile at get_pos.
-    pub fn display_message_later_ent(self, msg_later: MessageLaterEnt<E>, get_pos: Point) -> Self {
-        Self {
-            action: CmdInner::MessageLaterEnt(msg_later),
-			get_pos,
-            ..self
-        }
-    }
-	
-	/// Computes the message to display using the provided closure given
-	/// the entity at the position of the cmd.
-    pub fn display_message_later_tile(self, msg_later: MessageLaterTile<E>, get_pos: Point) -> Self {
-        Self {
-            action: CmdInner::MessageLaterTile(msg_later),
-			get_pos,
-            ..self
-        }
-    }
-
-    /// Clears all text on the row defined by the current position.
-    pub fn clear_row(self) -> Self {
-        Self {
-            action: CmdInner::ClearRow,
-            ..self
-        }
     }
 
     /// Sets the position to move the entity to.
@@ -257,7 +212,6 @@ impl<E: Entity> Default for Cmd<E> {
 	fn default() -> Self {
 		Self {
 			pos: Pos::default(),
-			get_pos: Point::ORIGIN,
 			action: CmdInner::default(),
 		}
 	}
@@ -373,34 +327,6 @@ impl<E: Entity> Map<E> {
 						ek = pos;
 					},
 					CmdInner::Disp(disp) => new_pos = Some(ek + disp),
-					CmdInner::Message(msg) => {
-						let _ = execute!(
-							io::stdout(),
-							cursor::MoveTo(pos.x as u16, pos.y as u16),
-							crossterm::style::Print(msg)
-						);
-					}
-					CmdInner::MessageLaterEnt(msg_later) => {
-						let _ = execute!(
-							io::stdout(),
-							cursor::MoveTo(pos.x as u16, pos.y as u16),
-							crossterm::style::Print(msg_later(self.get_ent(cmd.get_pos).expect("No entity?")))
-						);
-					}
-					CmdInner::MessageLaterTile(msg_later) => {
-						let _ = execute!(
-							io::stdout(),
-							cursor::MoveTo(pos.x as u16, pos.y as u16),
-							crossterm::style::Print(msg_later(self.get_map(cmd.get_pos).expect("No tile?")))
-						);
-					}
-					CmdInner::ClearRow => {
-						let _ = execute!(
-							io::stdout(),
-							cursor::MoveTo(0, pos.y as u16),
-							terminal::Clear(terminal::ClearType::CurrentLine)
-						);
-					}
 					CmdInner::Null => (),
 				}
 
@@ -450,7 +376,7 @@ impl<E: Entity> Map<E> {
     ) -> Option<Vec<Point>> {
 		let goals: Vec<Point> = goals.into_iter().collect();
 		
-		if goals.len() == 0 {
+		if goals.is_empty() {
 			return None;
 		}
 		
@@ -513,11 +439,48 @@ impl<E: Entity> Map<E> {
         None
     }
 	
-	/// Display this map using a window with the given settings.
-	pub fn display_with(&self, settings: WindowSettings) {
-		let win = Window::new(self, settings);
+	/// Creates a string representation of the current state of the subsection
+	/// of the map defined by the provided dimensions.
+	pub fn to_string(&self, top_left: Point, map_wid: u32, map_hgt: u32) -> String {
+		let mut out = String::new();
+		let hgt = map_hgt as i32;
+		let wid = map_wid as i32;
 		
-		win.display();
+		let def = E::Tile::default().to_string();
+		
+        for y in (top_left.y - hgt..top_left.y).rev() {
+            for x in top_left.x..top_left.x + wid {
+				let pos = Point::new(x, y);
+				let txt = match self.get_ent(pos) {
+					Some(e) => e.to_string(),
+					None => match self.get_map(pos) {
+						Some(t) => t.to_string(),
+						None => def.clone(),
+					},
+				};
+                match self.get_effect(pos) {
+                    Some(v) => out.push_str(&v.modify_txt(&txt).to_string()),
+                    None => out.push_str(&txt),
+                };
+            }
+        }
+		
+		out
+	}
+	
+	/// Display this map into a window. Will only fail if the underlying write implementation
+	/// fails.
+	#[cfg(feature = "windowed")]
+	pub fn display_into(
+		&self,
+		win: &mut windowed::Window<char>,
+		map_top_left: Point,
+		map_wid: u32,
+		map_hgt: u32
+	) -> fmt::Result {
+		let str_repr = self.to_string(map_top_left, map_wid, map_hgt);
+		
+		win.write_str(&str_repr)
 	}
 }
 
@@ -546,140 +509,5 @@ impl Ord for PathItem {
 impl PartialOrd for PathItem {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
-    }
-}
-
-/// A window into a map, so that only part of it has to be
-/// displayed at once. Do note that the origin is also the
-/// top left corner of the map.
-#[derive(Clone, Copy)]
-pub struct WindowSettings {
-    /// Position of the top left corner of the window.
-    pub top_left: Point,
-    /// Width of the window.
-    pub wid: u16,
-    /// Height of the window.
-    pub hgt: u16,
-    /// Number of cells by which the window is offset to the right.
-    pub x_offset: u16,
-    /// Number of cells by which the window is offset downwards.
-    pub y_offset: u16,
-}
-
-impl WindowSettings {
-    /// Create a new template with the given dimensions.
-    pub fn new(
-        top_left: Point,
-        wid: u16,
-        hgt: u16,
-        x_offset: u16,
-        y_offset: u16,
-    ) -> Self {
-        Self {
-            top_left,
-            wid,
-            hgt,
-            x_offset,
-            y_offset,
-        }
-    }
-	
-	/// Relocates the window's top left corner to the given position.
-	pub fn move_to(&mut self, pos: Point) {
-		self.top_left = pos;
-	}
-	
-	/// Centres the window on the given position.
-	pub fn centre_on(&mut self, pos: Point) {
-		self.top_left = pos - Point::new(self.wid as i32 / 2, -(self.hgt as i32) / 2);
-	}
-}
-
-/// A window into a map, so that only part of it has to be
-/// displayed at once.
-struct Window<'a, E: Entity> {
-    top_left: Point,
-    wid: u16,
-    hgt: u16,
-    x_offset: u16,
-    y_offset: u16,
-    inner: &'a Map<E>,
-}
-
-#[allow(unused_must_use)]
-impl<'a, E: Entity> Window<'a, E> {
-    /// Create a new window into the given map with the given dimensions.
-    fn new(inner: &'a Map<E>, settings: WindowSettings) -> Window<'a, E> {
-        let WindowSettings {
-            top_left,
-            wid,
-            hgt,
-            x_offset,
-            y_offset,
-        } = settings;
-        Self {
-            inner,
-            top_left,
-            wid,
-            hgt,
-            x_offset,
-            y_offset,
-        }
-    }
-
-    /// Clears the old grid displayed in the terminal and replaces it with the
-    /// current one.
-    /// Consumes the window as it is no longer needed; the real grid should now
-    /// be updated.
-    fn display(self) {
-        #[cfg(target_os = "windows")]
-        {
-            let mut handle = io::stdout();
-
-            queue!(
-                handle,
-                cursor::Hide,
-                cursor::MoveTo(0, self.y_offset),
-                crossterm::style::Print(self),
-            );
-            handle.flush();
-        }
-        #[cfg(not(target_os = "windows"))]
-        print!("{self}");
-    }
-}
-
-impl<E: Entity> fmt::Display for Window<'_, E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let def = E::Tile::default().to_string();
-        let spaces = String::from_utf8(vec![b' '; self.x_offset.into()]).unwrap();
-		
-        for y in (self.top_left.y - self.hgt as i32..self.top_left.y).rev() {
-            write!(f, "{spaces}")?;
-            for x in self.top_left.x..self.top_left.x + self.wid as i32 {
-				let pos = Point::from((x, y));
-				let txt = match self.get_ent(pos) {
-					Some(e) => e.to_string(),
-					None => match self.get_map(pos) {
-						Some(t) => t.to_string(),
-						None => def.clone(),
-					},
-				};
-                match self.get_effect(pos) {
-                    Some(v) => write!(f, "{}", v.modify_txt(&txt))?,
-                    None => write!(f, "{txt}")?,
-                };
-            }
-            writeln!(f)?;
-        }
-        Ok(())
-    }
-}
-
-impl<E: Entity> ops::Deref for Window<'_, E> {
-    type Target = Map<E>;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner
     }
 }
