@@ -77,6 +77,11 @@ impl<'a, E: Entity> Commands<'a, E> {
     pub fn queue(&mut self, cmd: Cmd<E>) {
         self.cmds.push_back(cmd);
     }
+	
+	/// Queue all the commands from the iterator.
+	pub fn queue_many<I: IntoIterator<Item = Cmd<E>>>(&mut self, cmd_iter: I) {
+		self.cmds.extend(cmd_iter);
+	}
 }
 
 type EditTile<T> = Box<dyn Fn(&mut T)>;
@@ -531,6 +536,10 @@ impl PartialEq for PathItem {
 impl Ord for PathItem {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         other.f_score.cmp(&self.f_score)
+			// Ensure they never compare equal unless everything is the same, 
+			// in which case it wouldn't matter.
+			.then_with(|| self.pos.x.cmp(&other.pos.x))
+			.then_with(|| self.pos.y.cmp(&other.pos.y))
     }
 }
 
@@ -587,8 +596,7 @@ impl WindowSettings {
 }
 
 /// A window into a map, so that only part of it has to be
-/// displayed at once. Do note that the origin is also the
-/// top left corner of the map.
+/// displayed at once.
 struct Window<'a, E: Entity> {
     top_left: Point,
     wid: u16,
