@@ -6,7 +6,7 @@ repository = "https://github.com/That-H/bandit"
 
 [dependencies]
 point = { git = "https://github.com/That-H/point/", tag = "0.6.1" }
-windowed = { git = "https://github.com/That-H/windowed/", tag = "0.1.1", optional = true }
+windowed = { git = "https://github.com/That-H/windowed/", tag = "0.2.0", optional = true }
 
 [features]
 default = ["windowed"]

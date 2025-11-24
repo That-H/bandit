@@ -2,7 +2,6 @@
 
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::{cmp, fmt, ops};
-use fmt::Write;
 
 pub use point::Point;
 
@@ -14,30 +13,38 @@ pub use windowed;
 /// display implementation never outputs a newline character or more
 /// than one character at a time, and that the default value represents
 /// an empty tile to be used where there is no tile in the map.
-pub trait Tile: fmt::Display + Default {}
+pub trait Tile: Default {
+	/// Type used to display this Tile.
+	type Repr: fmt::Display + Clone;
+	
+	/// Create a [Display]able representation of this tile.
+	fn repr(&self) -> Self::Repr;
+}
 
 /// Trait for types that are able to be used as visual effects in a [Map].
 pub trait Vfx {
+	/// Type used to display this effect.
 	type Txt: fmt::Display;
 	
     /// Update the visual effect. Returns true
     /// if it should be deleted, otherwise returns false.
     fn update(&mut self) -> bool;
 	
-	/// Takes as input the character at the position of the effect
+	/// Takes as input the representation at the position of the effect
 	/// and returns a new message.
-	fn modify_txt(&self, txt: &str) -> Self::Txt;
+	fn modify_txt(&self, txt: &Self::Txt) -> Self::Txt;
 }
 
 /// Types that actively do something in a [Map] instead of just being
 /// like a tile.
-pub trait Entity: fmt::Display {
+pub trait Entity {
     /// The Tile type associated with this entity.
     type Tile: Tile;
     /// The visual effect type associated with this entity.
-    type Vfx: Vfx;
-    /// The printable type for displaying information used by this entity.
-    type Msg: fmt::Display;
+    type Vfx: Vfx<Txt = <<Self as Entity>::Tile as Tile>::Repr>;
+	
+	/// Create a [Display]able representation of this entity.
+	fn repr(&self) -> <<Self as Entity>::Tile as Tile>::Repr;
 
     /// Queue everything that needs to change as a result of this entity
     /// after a frame. Pos is the current position of the entity in the map.
@@ -280,22 +287,27 @@ impl<E: Entity> Map<E> {
 		self.entities.iter().filter(|(_k, e)| e.priority() > 0).max_by_key(|(_k, e)| e.priority())
 	}
 	
-    /// Updates the highest priority entity. Returns whether or not any 
+	/// Updates the highest priority entity. Returns whether or not any 
 	/// entities were updated. Entities will not be updated if there aren't
 	/// any with a priority above 0.
-    pub fn update(&mut self) -> bool {
-		if let Some((ek, ent)) = self.get_highest_priority() { 
+	pub fn update(&mut self) -> bool {
+		match self.get_highest_priority() {
+			Some((p, _e)) => self.force_update(*p),
+			None => false
+		}
+	}
+	
+	/// Updates the entity at the given position, regardless of its priority.
+    pub fn force_update(&mut self, mut e_pos: Point) -> bool {
+		if let Some(ent) = self.get_ent(e_pos) {
 			let mut comms = Commands::new(self);
 			
-			// Convenience.
-			let mut ek = *ek;
-			
 			// Get and apply changes.
-			ent.update(&mut comms, ek);
+			ent.update(&mut comms, e_pos);
 			for cmd in comms.cmds {
 				let pos = match cmd.pos {
 					Pos::Other(pos) => pos,
-					Pos::This => ek,
+					Pos::This => e_pos,
 				};
 
 				let mut new_pos = None;
@@ -322,11 +334,13 @@ impl<E: Entity> Map<E> {
 					CmdInner::DelEnt => {
 						self.entities.remove(&pos);
 					}
-					CmdInner::MoveTo(pos) => { 
-						new_pos = Some(pos);
-						ek = pos;
+					CmdInner::MoveTo(to) => { 
+						new_pos = Some(to);
+						if pos == e_pos {
+							e_pos = to;
+						}
 					},
-					CmdInner::Disp(disp) => new_pos = Some(ek + disp),
+					CmdInner::Disp(disp) => new_pos = Some(e_pos + disp),
 					CmdInner::Null => (),
 				}
 
@@ -439,48 +453,49 @@ impl<E: Entity> Map<E> {
         None
     }
 	
-	/// Creates a string representation of the current state of the subsection
+	/// Creates a representation of the current state of the subsection
 	/// of the map defined by the provided dimensions.
-	pub fn to_string(&self, top_left: Point, map_wid: u32, map_hgt: u32) -> String {
-		let mut out = String::new();
+	pub fn to_chars(&self, top_left: Point, map_wid: u32, map_hgt: u32) -> Vec<Vec<<<E as Entity>::Tile as Tile>::Repr>> {
+		let mut out = Vec::new();
 		let hgt = map_hgt as i32;
 		let wid = map_wid as i32;
 		
-		let def = E::Tile::default().to_string();
+		let def = E::Tile::default().repr();
 		
         for y in (top_left.y - hgt..top_left.y).rev() {
+			let mut cur_out = Vec::new();
             for x in top_left.x..top_left.x + wid {
 				let pos = Point::new(x, y);
 				let txt = match self.get_ent(pos) {
-					Some(e) => e.to_string(),
+					Some(e) => e.repr(),
 					None => match self.get_map(pos) {
-						Some(t) => t.to_string(),
+						Some(t) => t.repr(),
 						None => def.clone(),
 					},
 				};
                 match self.get_effect(pos) {
-                    Some(v) => out.push_str(&v.modify_txt(&txt).to_string()),
-                    None => out.push_str(&txt),
+                    Some(v) => cur_out.push(v.modify_txt(&txt)),
+                    None => cur_out.push(txt),
                 };
             }
+			out.push(cur_out);
         }
-		
+
 		out
 	}
 	
-	/// Display this map into a window. Will only fail if the underlying write implementation
-	/// fails.
+	/// Display this map into a window. Overwrites all previous contents.
 	#[cfg(feature = "windowed")]
 	pub fn display_into(
 		&self,
-		win: &mut windowed::Window<char>,
+		win: &mut windowed::Window<<<E as Entity>::Tile as Tile> ::Repr>,
 		map_top_left: Point,
 		map_wid: u32,
 		map_hgt: u32
-	) -> fmt::Result {
-		let str_repr = self.to_string(map_top_left, map_wid, map_hgt);
+	) {
+		let data = self.to_chars(map_top_left, map_wid, map_hgt);
 		
-		win.write_str(&str_repr)
+		win.data = data;
 	}
 }
 
