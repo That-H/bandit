@@ -280,6 +280,12 @@ impl<E: Entity> Map<E> {
         self.entities.get(&pos)
     }
 
+    /// Get the entity at the given position mutably.
+    #[inline]
+    pub fn get_ent_mut(&mut self, pos: Point) -> Option<&mut E> {
+        self.entities.get_mut(&pos)
+    }
+    
     /// Return all entities in the map with positions in an
     /// arbitrary order.
     pub fn get_entities(&self) -> impl Iterator<Item = (&Point, &E)> {
