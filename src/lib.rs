@@ -225,6 +225,7 @@ impl<E: Entity> Default for Cmd<E> {
 }
 
 /// Contains all tiles in the game grid.
+#[derive(Clone)]
 pub struct Map<E: Entity> {
     /// Width of the grid in tiles.
     pub wid: usize,
@@ -285,7 +286,7 @@ impl<E: Entity> Map<E> {
     pub fn get_ent_mut(&mut self, pos: Point) -> Option<&mut E> {
         self.entities.get_mut(&pos)
     }
-    
+
     /// Return all entities in the map with positions in an
     /// arbitrary order.
     pub fn get_entities(&self) -> impl Iterator<Item = (&Point, &E)> {
@@ -296,16 +297,24 @@ impl<E: Entity> Map<E> {
     /// Will not return anything if there are no entities with a priority
     /// above 0.
     pub fn get_highest_priority(&self) -> Option<(&Point, &E)> {
-        self.entities.iter().filter(|(_k, e)| e.priority() > 0).max_by_key(|(_k, e)| e.priority())
+        self.entities
+            .iter()
+            .filter(|(_k, e)| e.priority() > 0)
+            .max_by(|(k, e), (k2, e2)| {
+                e.priority()
+                    .cmp(e2)
+                    .then_with(|| k2.x.cmp(k.x))
+                    .then_with(|| k.y.cmp(k2.y))
+            })
     }
 
-    /// Updates the highest priority entity. Returns whether or not any 
+    /// Updates the highest priority entity. Returns whether or not any
     /// entities were updated. Entities will not be updated if there aren't
     /// any with a priority above 0.
     pub fn update(&mut self) -> bool {
         match self.get_highest_priority() {
             Some((p, _e)) => self.force_update(*p),
-            None => false
+            None => false,
         }
     }
 
@@ -346,12 +355,12 @@ impl<E: Entity> Map<E> {
                     CmdInner::DelEnt => {
                         self.entities.remove(&pos);
                     }
-                    CmdInner::MoveTo(to) => { 
+                    CmdInner::MoveTo(to) => {
                         new_pos = Some(to);
                         if pos == e_pos {
                             e_pos = to;
                         }
-                    },
+                    }
                     CmdInner::Disp(disp) => new_pos = Some(e_pos + disp),
                     CmdInner::Null => (),
                 }
@@ -369,7 +378,7 @@ impl<E: Entity> Map<E> {
         }
     }
 
-    /// Update all visual effects currently in the map, and remove any 
+    /// Update all visual effects currently in the map, and remove any
     /// that return true when updated. Return the number of vfx left.
     pub fn update_vfx(&mut self) -> usize {
         let mut dead = Vec::new();
@@ -405,17 +414,24 @@ impl<E: Entity> Map<E> {
         if goals.is_empty() || neighbours.is_empty() {
             return None;
         }
-        let min_move_dist = neighbours.iter().map(|p| Point::ORIGIN.manhattan_dist(*p)).max().unwrap();
+        let min_move_dist = neighbours
+            .iter()
+            .map(|p| Point::ORIGIN.manhattan_dist(*p))
+            .max()
+            .unwrap();
 
         // Use the manhattan distance as the heuristic function. Slightly modified to account for
         // moves having an additional cost of 1.
-        let h = |p: Point| { 
+        let h = |p: Point| {
             let min_dist = goals.iter().map(|pos| pos.manhattan_dist(p)).min().unwrap();
             min_dist + min_dist / min_move_dist
         };
 
         let mut open_set = BinaryHeap::new();
-        open_set.push(PathItem { pos: start, f_score: 0 });
+        open_set.push(PathItem {
+            pos: start,
+            f_score: 0,
+        });
 
         let mut came_from = HashMap::new();
 
@@ -429,7 +445,7 @@ impl<E: Entity> Map<E> {
             for neighbour in neighbours.iter() {
                 let mut cur_pos = cur.pos;
                 let cost = (neighbour.x.abs() + neighbour.y.abs()) as usize + 1;
-                let neighbour = *neighbour + cur_pos;	
+                let neighbour = *neighbour + cur_pos;
 
                 let win = goals.contains(&neighbour);
 
@@ -451,7 +467,10 @@ impl<E: Entity> Map<E> {
                     // Ok to cast as manhattan_dist is always positive.
                     let this_f = tentative + h(neighbour) as usize;
                     f_score.insert(neighbour, this_f);
-                    open_set.push(PathItem { pos: neighbour, f_score: this_f });
+                    open_set.push(PathItem {
+                        pos: neighbour,
+                        f_score: this_f,
+                    });
                 }
 
                 if win {
@@ -472,7 +491,12 @@ impl<E: Entity> Map<E> {
 
     /// Creates a representation of the current state of the subsection
     /// of the map defined by the provided dimensions.
-    pub fn to_chars(&self, top_left: Point, map_wid: u32, map_hgt: u32) -> Vec<Vec<<<E as Entity>::Tile as Tile>::Repr>> {
+    pub fn to_chars(
+        &self,
+        top_left: Point,
+        map_wid: u32,
+        map_hgt: u32,
+    ) -> Vec<Vec<<<E as Entity>::Tile as Tile>::Repr>> {
         let mut out = Vec::new();
         let hgt = map_hgt as i32;
         let wid = map_wid as i32;
@@ -505,10 +529,10 @@ impl<E: Entity> Map<E> {
     #[cfg(feature = "windowed")]
     pub fn display_into(
         &self,
-        win: &mut windowed::Window<<<E as Entity>::Tile as Tile> ::Repr>,
+        win: &mut windowed::Window<<<E as Entity>::Tile as Tile>::Repr>,
         map_top_left: Point,
         map_wid: u32,
-        map_hgt: u32
+        map_hgt: u32,
     ) {
         let data = self.to_chars(map_top_left, map_wid, map_hgt);
 
@@ -530,8 +554,10 @@ impl PartialEq for PathItem {
 
 impl Ord for PathItem {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        other.f_score.cmp(&self.f_score)
-            // Ensure they never compare equal unless everything is the same, 
+        other
+            .f_score
+            .cmp(&self.f_score)
+            // Ensure they never compare equal unless everything is the same,
             // in which case it wouldn't matter.
             .then_with(|| self.pos.x.cmp(&other.pos.x))
             .then_with(|| self.pos.y.cmp(&other.pos.y))
