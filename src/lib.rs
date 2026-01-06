@@ -295,16 +295,16 @@ impl<E: Entity> Map<E> {
 
     /// Returns the entity (and co-ordinates) with the highest priority.
     /// Will not return anything if there are no entities with a priority
-    /// above 0.
+    /// above 0. Prefers entities closer to the top left if there is a tie with priorities.
     pub fn get_highest_priority(&self) -> Option<(&Point, &E)> {
         self.entities
             .iter()
             .filter(|(_k, e)| e.priority() > 0)
             .max_by(|(k, e), (k2, e2)| {
                 e.priority()
-                    .cmp(e2)
-                    .then_with(|| k2.x.cmp(k.x))
-                    .then_with(|| k.y.cmp(k2.y))
+                    .cmp(&e2.priority())
+                    .then_with(|| k2.x.cmp(&k.x))
+                    .then_with(|| k.y.cmp(&k2.y))
             })
     }
 
