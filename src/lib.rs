@@ -304,10 +304,10 @@ impl<E: Entity> Map<E> {
     }
 
     /// Updates all entities in the map, once each, in priority order. Does not ignore entities
-    /// with 0 priority.
+    /// with 0 priority. Assumes no entities will move during this.
     pub fn update_all(&mut self) {
         let mut ents: Vec<_> = self.get_entities().collect();
-        ents.sort_by(Self::cmp_ent);
+        ents.sort_by(|e1, e2| Self::cmp_ent(e2, e1));
         let pos_l: Vec<_> = ents.into_iter().map(|(&k, _e)| k).collect();
 
         for p in pos_l {
@@ -361,10 +361,14 @@ impl<E: Entity> Map<E> {
                         self.entities.insert(pos, e);
                     }
                     CmdInner::ModTile(f) => {
-                        f(self.map.get_mut(&pos).expect("No tile?"));
+                        if let Some(t) = self.map.get_mut(&pos) {
+                            f(t);
+                        }
                     }
                     CmdInner::ModEnt(f) => {
-                        f(self.entities.get_mut(&pos).expect("No entity?"));
+                        if let Some(e) = self.get_ent_mut(pos) {
+                            f(e);
+                        }
                     }
                     CmdInner::DelTile => {
                         self.map.remove(&pos);
@@ -378,7 +382,13 @@ impl<E: Entity> Map<E> {
                             e_pos = to;
                         }
                     }
-                    CmdInner::Disp(disp) => new_pos = Some(e_pos + disp),
+                    CmdInner::Disp(disp) => {
+                        let to = pos + disp;
+                        if pos == e_pos {
+                            e_pos = to;
+                        }
+                        new_pos = Some(to);
+                    }
                     CmdInner::Null => (),
                 }
 
