@@ -300,12 +300,29 @@ impl<E: Entity> Map<E> {
         self.entities
             .iter()
             .filter(|(_k, e)| e.priority() > 0)
-            .max_by(|(k, e), (k2, e2)| {
-                e.priority()
-                    .cmp(&e2.priority())
-                    .then_with(|| k2.x.cmp(&k.x))
-                    .then_with(|| k.y.cmp(&k2.y))
-            })
+            .max_by(Self::cmp_ent)
+    }
+
+    /// Updates all entities in the map, once each, in priority order. Does not ignore entities
+    /// with 0 priority.
+    pub fn update_all(&mut self) {
+        let mut ents: Vec<_> = self.get_entities().collect();
+        ents.sort_by(Self::cmp_ent);
+        let pos_l: Vec<_> = ents.into_iter().map(|(&k, _e)| k).collect();
+
+        for p in pos_l {
+            self.force_update(p);
+        }
+    }
+
+    /// Compares two entities, ordering by priority, then leftness, then upness.
+    fn cmp_ent(e1: &(&Point, &E), e2: &(&Point, &E)) -> cmp::Ordering {
+        let (k, e) = e1;
+        let (k2, e2) = e2;
+        e.priority()
+            .cmp(&e2.priority())
+            .then_with(|| k2.x.cmp(&k.x))
+            .then_with(|| k.y.cmp(&k2.y))
     }
 
     /// Updates the highest priority entity. Returns whether or not any
