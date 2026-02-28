@@ -94,6 +94,7 @@ impl<'a, E: Entity> Commands<'a, E> {
 
 type EditTile<T> = Box<dyn Fn(&mut T)>;
 type EditEntity<E> = Box<dyn Fn(&mut E)>;
+type EditFx<V> = Box<dyn Fn(&mut V)>;
 
 #[derive(Clone, Copy, Default)]
 enum Pos {
@@ -106,8 +107,10 @@ enum Pos {
 enum CmdInner<E: Entity> {
     ModTile(EditTile<E::Tile>),
     ModEnt(EditEntity<E>),
+    ModFx(EditFx<E::Vfx>),
     DelTile,
     DelEnt,
+    DelFx,
     CreateTile(E::Tile),
     CreateVfx(E::Vfx),
     CreateEnt(E),
@@ -174,6 +177,14 @@ impl<E: Entity> Cmd<E> {
         }
     }
 
+    /// Defines the function used to modify the effect.
+    pub fn modify_effect(self, f: EditFx<E::Vfx>) -> Self {
+        Self {
+            action: CmdInner::ModFx(f),
+            ..self
+        }
+    }
+
     /// Adds the tile to create.
     pub fn create_tile(self, tile: E::Tile) -> Self {
         Self {
@@ -210,6 +221,14 @@ impl<E: Entity> Cmd<E> {
     pub fn delete_entity(self) -> Self {
         Self {
             action: CmdInner::DelEnt,
+            ..self
+        }
+    }
+
+    /// Causes the effect at this position to be deleted.
+    pub fn delete_effect(self) -> Self {
+        Self {
+            action: CmdInner::DelFx,
             ..self
         }
     }
@@ -270,11 +289,6 @@ impl<E: Entity> Map<E> {
         self.map.get_mut(&pos)
     }
 
-    #[inline]
-    fn get_effect(&self, pos: Point) -> Option<&E::Vfx> {
-        self.vfx.get(&pos)
-    }
-
     /// Get the entity at the given position.
     #[inline]
     pub fn get_ent(&self, pos: Point) -> Option<&E> {
@@ -285,6 +299,18 @@ impl<E: Entity> Map<E> {
     #[inline]
     pub fn get_ent_mut(&mut self, pos: Point) -> Option<&mut E> {
         self.entities.get_mut(&pos)
+    }
+
+    /// Get the effect at the given position.
+    #[inline]
+    pub fn get_fx(&self, pos: Point) -> Option<&E::Vfx> {
+        self.vfx.get(&pos)
+    }
+
+    /// Get the effect at the given position mutably.
+    #[inline]
+    pub fn get_fx_mut(&mut self, pos: Point) -> Option<&mut E::Vfx> {
+        self.vfx.get_mut(&pos)
     }
 
     /// Return all entities in the map with positions in an
@@ -370,11 +396,19 @@ impl<E: Entity> Map<E> {
                             f(e);
                         }
                     }
+                    CmdInner::ModFx(f) => {
+                        if let Some(v) = self.get_fx_mut(pos) {
+                            f(v);
+                        }
+                    }
                     CmdInner::DelTile => {
                         self.map.remove(&pos);
                     }
                     CmdInner::DelEnt => {
                         self.entities.remove(&pos);
+                    }
+                    CmdInner::DelFx => {
+                        self.vfx.remove(&pos);
                     }
                     CmdInner::MoveTo(to) => {
                         new_pos = Some(to);
@@ -541,7 +575,7 @@ impl<E: Entity> Map<E> {
                         None => def.clone(),
                     },
                 };
-                match self.get_effect(pos) {
+                match self.get_fx(pos) {
                     Some(v) => cur_out.push(v.modify_txt(&txt)),
                     None => cur_out.push(txt),
                 };
