@@ -292,7 +292,7 @@ impl<E: Entity> Map<E> {
     /// Delete and return the tile at the given position, if there is one.
     #[inline]
     pub fn del_map(&mut self, pos: Point) -> Option<E::Tile> {
-        self.map.remove(pos)
+        self.map.remove(&pos)
     }
 
     /// Get the entity at the given position.
@@ -325,9 +325,9 @@ impl<E: Entity> Map<E> {
         self.vfx.get_mut(&pos)
     }
 
-    /// Delete return the effect at the provided position, if there is one.
+    /// Delete and return the effect at the provided position, if there is one.
     #[inline]
-    pub fn del_fx(&mut self, pos: Point) -> Option<E> {
+    pub fn del_fx(&mut self, pos: Point) -> Option<E::Vfx> {
         self.vfx.remove(&pos)
     }
 
