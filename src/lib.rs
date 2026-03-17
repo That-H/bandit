@@ -65,14 +65,6 @@ pub struct Commands<'a, E: Entity> {
     cmds: VecDeque<Cmd<E>>,
 }
 
-impl<E: Entity> ops::Deref for Commands<'_, E> {
-    type Target = Map<E>;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner
-    }
-}
-
 impl<'a, E: Entity> Commands<'a, E> {
     fn new(inner: &'a Map<E>) -> Commands<'a, E> {
         Self {
@@ -89,6 +81,44 @@ impl<'a, E: Entity> Commands<'a, E> {
     /// Queue all the commands from the iterator.
     pub fn queue_many<I: IntoIterator<Item = Cmd<E>>>(&mut self, cmd_iter: I) {
         self.cmds.extend(cmd_iter);
+    }
+}
+
+impl<E: Entity> ops::Deref for Commands<'_, E> {
+    type Target = Map<E>;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner
+    }
+}
+
+impl<E: Entity> IntoIterator for Commands<'_, E> {
+    type Item = Cmd<E>;
+    type IntoIter = CmdIter<E>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        CmdIter::from(self)
+    }
+}
+
+/// An iterator over the commands in a [Commands] instance.
+pub struct CmdIter<E: Entity> {
+    iter: std::collections::vec_deque::IntoIter<Cmd<E>>,
+}
+
+impl<E: Entity> Iterator for CmdIter<E> {
+    type Item = Cmd<E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+impl<E: Entity> From<Commands<'_, E>> for CmdIter<E> {
+    fn from(value: Commands<'_, E>) -> Self {
+        Self {
+            iter: value.cmds.into_iter()
+        }
     }
 }
 
@@ -333,8 +363,97 @@ impl<E: Entity> Map<E> {
 
     /// Return all entities in the map with positions in an
     /// arbitrary order.
+    #[inline]
     pub fn get_entities(&self) -> impl Iterator<Item = (&Point, &E)> {
         self.entities.iter()
+    }
+
+    /// Return all tiles in the map with positions in an arbirtary order.
+    #[inline]
+    pub fn get_tiles(&self) -> impl Iterator<Item = (&Point, &E::Tile)> {
+        self.map.iter()
+    }
+
+    /// Return all effects in the map with positions in an arbirtary order.
+    #[inline]
+    pub fn get_all_fx(&self) -> impl Iterator<Item = (&Point, &E::Vfx)> {
+        self.vfx.iter()
+    }
+
+    /// Return a commands instance for this map.
+    #[inline]
+    pub fn get_comms(&self) -> Commands<'_, E> {
+        Commands::new(self)
+    }
+
+    /// Do the effects of all commands in the iterator. Requires the position of the entity that
+    /// created these commands.
+    pub fn actuate_comms<I: IntoIterator<Item = Cmd<E>>>(&mut self, comms: I, mut src_pos: Point) {
+        for cmd in comms {
+            let pos = match cmd.pos {
+                Pos::Other(pos) => pos,
+                Pos::This => src_pos,
+            };
+
+            let mut new_pos = None;
+
+            match cmd.action {
+                CmdInner::CreateTile(t) => {
+                    self.map.insert(pos, t);
+                }
+                CmdInner::CreateVfx(v) => {
+                    self.vfx.insert(pos, v);
+                }
+                CmdInner::CreateEnt(e) => {
+                    self.entities.insert(pos, e);
+                }
+                CmdInner::ModTile(f) => {
+                    if let Some(t) = self.map.get_mut(&pos) {
+                        f(t);
+                    }
+                }
+                CmdInner::ModEnt(f) => {
+                    if let Some(e) = self.get_ent_mut(pos) {
+                        f(e);
+                    }
+                }
+                CmdInner::ModFx(f) => {
+                    if let Some(v) = self.get_fx_mut(pos) {
+                        f(v);
+                    }
+                }
+                CmdInner::DelTile => {
+                    self.map.remove(&pos);
+                }
+                CmdInner::DelEnt => {
+                    self.entities.remove(&pos);
+                }
+                CmdInner::DelFx => {
+                    self.vfx.remove(&pos);
+                }
+                CmdInner::MoveTo(to) => {
+                    new_pos = Some(to);
+                    if pos == src_pos {
+                        src_pos = to;
+                    }
+                }
+                CmdInner::Disp(disp) => {
+                    let to = pos + disp;
+                    if pos == src_pos {
+                        src_pos = to;
+                    }
+                    new_pos = Some(to);
+                }
+                CmdInner::Null => (),
+            }
+
+            if let Some(new_pos) = new_pos {
+                // Take it out of the old place and put it in the new place if necessary.
+                let rem = self.entities.remove(&pos).unwrap();
+
+                self.entities.insert(new_pos, rem);
+            }
+        }
     }
 
     /// Returns the entity (and co-ordinates) with the highest priority.
@@ -379,78 +498,15 @@ impl<E: Entity> Map<E> {
         }
     }
 
-    /// Updates the entity at the given position, regardless of its priority.
-    pub fn force_update(&mut self, mut e_pos: Point) -> bool {
+    /// Updates the entity at the given position, regardless of its priority. Returns false if
+    /// there is no entity at e_pos, otherwise returns true.
+    pub fn force_update(&mut self, e_pos: Point) -> bool {
         if let Some(ent) = self.get_ent(e_pos) {
             let mut comms = Commands::new(self);
 
             // Get and apply changes.
             ent.update(&mut comms, e_pos);
-            for cmd in comms.cmds {
-                let pos = match cmd.pos {
-                    Pos::Other(pos) => pos,
-                    Pos::This => e_pos,
-                };
-
-                let mut new_pos = None;
-
-                match cmd.action {
-                    CmdInner::CreateTile(t) => {
-                        self.map.insert(pos, t);
-                    }
-                    CmdInner::CreateVfx(v) => {
-                        self.vfx.insert(pos, v);
-                    }
-                    CmdInner::CreateEnt(e) => {
-                        self.entities.insert(pos, e);
-                    }
-                    CmdInner::ModTile(f) => {
-                        if let Some(t) = self.map.get_mut(&pos) {
-                            f(t);
-                        }
-                    }
-                    CmdInner::ModEnt(f) => {
-                        if let Some(e) = self.get_ent_mut(pos) {
-                            f(e);
-                        }
-                    }
-                    CmdInner::ModFx(f) => {
-                        if let Some(v) = self.get_fx_mut(pos) {
-                            f(v);
-                        }
-                    }
-                    CmdInner::DelTile => {
-                        self.map.remove(&pos);
-                    }
-                    CmdInner::DelEnt => {
-                        self.entities.remove(&pos);
-                    }
-                    CmdInner::DelFx => {
-                        self.vfx.remove(&pos);
-                    }
-                    CmdInner::MoveTo(to) => {
-                        new_pos = Some(to);
-                        if pos == e_pos {
-                            e_pos = to;
-                        }
-                    }
-                    CmdInner::Disp(disp) => {
-                        let to = pos + disp;
-                        if pos == e_pos {
-                            e_pos = to;
-                        }
-                        new_pos = Some(to);
-                    }
-                    CmdInner::Null => (),
-                }
-
-                if let Some(new_pos) = new_pos {
-                    // Take it out of the old place and put it in the new place if necessary.
-                    let rem = self.entities.remove(&pos).unwrap();
-
-                    self.entities.insert(new_pos, rem);
-                }
-            }
+            self.actuate_comms(comms.into_iter(), e_pos);
             true
         } else {
             false
